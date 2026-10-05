@@ -8,7 +8,7 @@ const app = express();
 app.set("trust proxy", 1);
 
 const PORT = process.env.PORT || 3000;
-const ADMIN_KEY = process.env.ADMIN_KEY || ""; // set this so only YOU can create links
+const ADMIN_KEY = process.env.ADMIN_KEY || "Summa@123"; // set this so only YOU can create links
 const BASE_URL = process.env.BASE_URL || "";   // optional, e.g. https://links.yourdomain.com
 
 app.use(express.json());

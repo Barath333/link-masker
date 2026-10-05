@@ -6,23 +6,63 @@ const { Readable } = require("stream");
 
 const app = express();
 app.set("trust proxy", 1);
+
 const PORT = process.env.PORT || 3000;
-const ADMIN_KEY = process.env.ADMIN_KEY || "Summa@123";
-const BASE_URL = process.env.BASE_URL || "";   // e.g. https://links.yourdomain.com
-const DB_FILE = path.join(__dirname, "links.json");
+const ADMIN_KEY = process.env.ADMIN_KEY || ""; // set this so only YOU can create links
+const BASE_URL = process.env.BASE_URL || "";   // optional, e.g. https://links.yourdomain.com
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, "public")));
 
-// --- tiny JSON "database" ---
-const load = () => {
-  try { return JSON.parse(fs.readFileSync(DB_FILE, "utf8")); } catch { return {}; }
-};
-const save = (db) => fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
+// ---------- storage ----------
+// If Upstash Redis variables are set, links are saved there (survives restarts).
+// Otherwise they are saved in links.json (fine for running on your own Mac).
+const REDIS_URL = process.env.UPSTASH_REDIS_REST_URL;
+const REDIS_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
+const useRedis = Boolean(REDIS_URL && REDIS_TOKEN);
 
-const newId = () => crypto.randomBytes(5).toString("base64url"); // e.g. "k3Fx9aQ"
+async function redis(cmd) {
+  const r = await fetch(REDIS_URL, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${REDIS_TOKEN}`, "Content-Type": "application/json" },
+    body: JSON.stringify(cmd),
+  });
+  const data = await r.json();
+  if (data.error) throw new Error(data.error);
+  return data.result;
+}
 
+const DB_FILE = path.join(__dirname, "links.json");
+const loadFile = () => { try { return JSON.parse(fs.readFileSync(DB_FILE, "utf8")); } catch { return {}; } };
+const saveFile = (db) => fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
+
+const store = useRedis
+  ? {
+      async get(id) { const v = await redis(["HGET", "links", id]); return v ? JSON.parse(v) : null; },
+      async set(id, item) { await redis(["HSET", "links", id, JSON.stringify(item)]); },
+      async del(id) { await redis(["HDEL", "links", id]); },
+      async all() {
+        const arr = (await redis(["HGETALL", "links"])) || [];
+        const out = {};
+        for (let i = 0; i < arr.length; i += 2) out[arr[i]] = JSON.parse(arr[i + 1]);
+        return out;
+      },
+    }
+  : {
+      async get(id) { return loadFile()[id] || null; },
+      async set(id, item) { const db = loadFile(); db[id] = item; saveFile(db); },
+      async del(id) { const db = loadFile(); delete db[id]; saveFile(db); },
+      async all() { return loadFile(); },
+    };
+
+// ---------- helpers ----------
+const newId = () => crypto.randomBytes(5).toString("base64url");
 const baseUrl = (req) => BASE_URL || `${req.protocol}://${req.get("host")}`;
+const wrap = (fn) => (req, res, next) =>
+  fn(req, res, next).catch((e) => {
+    console.error(e);
+    if (!res.headersSent) res.status(500).json({ error: "Server error, please try again" });
+  });
 
 const requireAdmin = (req, res, next) => {
   if (ADMIN_KEY && req.get("x-admin-key") !== ADMIN_KEY) {
@@ -31,8 +71,8 @@ const requireAdmin = (req, res, next) => {
   next();
 };
 
-// --- create a masked link ---
-app.post("/api/links", requireAdmin, (req, res) => {
+// ---------- create a masked link ----------
+app.post("/api/links", requireAdmin, wrap(async (req, res) => {
   const { url, expiresInHours, oneTime, mode } = req.body || {};
   let parsed;
   try {
@@ -42,11 +82,10 @@ app.post("/api/links", requireAdmin, (req, res) => {
     return res.status(400).json({ error: "Enter a full URL starting with http:// or https://" });
   }
 
-  const db = load();
   let id = newId();
-  while (db[id]) id = newId();
+  while (await store.get(id)) id = newId();
 
-  db[id] = {
+  const item = {
     target: parsed.href,
     createdAt: Date.now(),
     expiresAt: expiresInHours ? Date.now() + Number(expiresInHours) * 3600 * 1000 : null,
@@ -54,29 +93,26 @@ app.post("/api/links", requireAdmin, (req, res) => {
     mode: mode === "proxy" ? "proxy" : "redirect",
     clicks: 0,
   };
-  save(db);
+  await store.set(id, item);
+  res.json({ id, link: `${baseUrl(req)}/go/${id}`, ...item });
+}));
 
-  res.json({ id, link: `${baseUrl(req)}/go/${id}`, ...db[id] });
-});
-
-// --- list links (for the UI) ---
-app.get("/api/links", requireAdmin, (req, res) => {
-  const db = load();
+// ---------- list links ----------
+app.get("/api/links", requireAdmin, wrap(async (req, res) => {
+  const db = await store.all();
   const list = Object.entries(db)
     .map(([id, v]) => ({ id, link: `${baseUrl(req)}/go/${id}`, ...v }))
     .sort((a, b) => b.createdAt - a.createdAt);
   res.json(list);
-});
+}));
 
-// --- delete a link ---
-app.delete("/api/links/:id", requireAdmin, (req, res) => {
-  const db = load();
-  delete db[req.params.id];
-  save(db);
+// ---------- delete a link ----------
+app.delete("/api/links/:id", requireAdmin, wrap(async (req, res) => {
+  await store.del(req.params.id);
   res.json({ ok: true });
-});
+}));
 
-// --- hide the original URL: fetch it on the server and pass it along ---
+// ---------- hide the original URL: fetch it on the server and pass it along ----------
 async function proxy(item, req, res) {
   try {
     const upstream = await fetch(item.target, {
@@ -95,7 +131,6 @@ async function proxy(item, req, res) {
       if (v) res.set(h, v);
     }
 
-    // Web pages: add a <base> tag so images, CSS and scripts still load from the real site
     if (type.includes("text/html")) {
       let html = await upstream.text();
       const base = `<base href="${upstream.url}">`;
@@ -103,7 +138,6 @@ async function proxy(item, req, res) {
       return res.send(html);
     }
 
-    // Files, images, PDFs, video: stream straight through
     const len = upstream.headers.get("content-length");
     if (len && !upstream.headers.get("content-encoding")) res.set("Content-Length", len);
     if (!upstream.body) return res.end();
@@ -113,26 +147,30 @@ async function proxy(item, req, res) {
   }
 }
 
-// --- the public link ---
-app.get("/go/:id", (req, res) => {
-  const db = load();
-  const item = db[req.params.id];
-
+// ---------- the public link ----------
+app.get("/go/:id", wrap(async (req, res) => {
+  const item = await store.get(req.params.id);
   if (!item) return res.status(404).send("This link doesn't exist.");
   if (item.expiresAt && Date.now() > item.expiresAt) {
     return res.status(410).send("This link has expired.");
   }
 
+  // Chat apps (WhatsApp etc.) open links to make previews. Don't count that as a visit.
+  const ua = req.get("user-agent") || "";
+  if (/whatsapp|telegrambot|facebookexternalhit|slackbot|twitterbot|discordbot|linkedinbot/i.test(ua)) {
+    return res.status(200).send("Link preview");
+  }
+
   item.clicks += 1;
-  if (item.oneTime) delete db[req.params.id];
-  save(db);
+  if (item.oneTime) await store.del(req.params.id);
+  else await store.set(req.params.id, item);
 
   res.set("Cache-Control", "no-store");
   if (item.mode === "proxy") return proxy(item, req, res);
   res.redirect(302, item.target);
-});
+}));
 
 app.listen(PORT, () => {
-  console.log(`Link masker running on http://localhost:${PORT}`);
+  console.log(`Link masker running on port ${PORT} (storage: ${useRedis ? "Upstash Redis" : "links.json file"})`);
   if (!ADMIN_KEY) console.log("Tip: set ADMIN_KEY so only you can create links.");
 });

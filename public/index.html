@@ -1,0 +1,191 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Link Masker</title>
+<style>
+  :root {
+    --bg: #f5f7f6; --panel: #ffffff; --ink: #14201b; --muted: #5d6d66;
+    --line: #d9e1dd; --accent: #0f6b4f; --accent-ink: #ffffff; --danger: #b3261e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0e1512; --panel: #151f1a; --ink: #e6efea; --muted: #8fa398;
+            --line: #26352d; --accent: #3fbf8f; --accent-ink: #06130d; --danger: #ff8a80; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 16px/1.5 "Segoe UI", system-ui, sans-serif; }
+  main { max-width: 680px; margin: 0 auto; padding: 40px 20px 80px; }
+  h1 { font-size: 28px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); margin: 0 0 28px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 20px; }
+  label { display: block; font-weight: 600; font-size: 14px; margin: 14px 0 6px; }
+  label:first-child { margin-top: 0; }
+  input[type=text], input[type=url], input[type=password], select {
+    width: 100%; padding: 10px 12px; font: inherit; color: var(--ink);
+    background: var(--bg); border: 1px solid var(--line); border-radius: 6px; }
+  input:focus-visible, select:focus-visible, button:focus-visible {
+    outline: 2px solid var(--accent); outline-offset: 2px; }
+  .row { display: flex; gap: 12px; flex-wrap: wrap; }
+  .row > div { flex: 1 1 200px; }
+  .check { display: flex; align-items: center; gap: 8px; margin-top: 14px; font-size: 14px; }
+  button { font: inherit; cursor: pointer; border-radius: 6px; padding: 10px 16px;
+           border: 1px solid var(--line); background: var(--panel); color: var(--ink); }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent);
+                   font-weight: 600; margin-top: 18px; width: 100%; }
+  button.small { padding: 6px 10px; font-size: 13px; }
+  button.danger { color: var(--danger); }
+  .error { color: var(--danger); margin-top: 12px; font-size: 14px; min-height: 1em; }
+  .result { margin-top: 20px; display: none; }
+  .result.show { display: block; }
+  .result .link { display: flex; gap: 8px; }
+  .result input { font-family: ui-monospace, Consolas, monospace; }
+  h2 { font-size: 18px; margin: 36px 0 12px; }
+  .item { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-top: 1px solid var(--line); }
+  .item:first-child { border-top: 0; }
+  .item .info { flex: 1; min-width: 0; }
+  .item .short { font-family: ui-monospace, Consolas, monospace; font-size: 14px; }
+  .item .target { color: var(--muted); font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .item .meta { color: var(--muted); font-size: 12px; }
+  .empty { color: var(--muted); }
+  details { margin-top: 20px; color: var(--muted); font-size: 14px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Link Masker</h1>
+  <p class="sub">Paste a real URL, get a random link to share. The link you share never shows the original address.</p>
+
+  <div class="panel">
+    <label for="url">Real URL</label>
+    <input id="url" type="url" placeholder="https://example.com/private/page" autocomplete="off">
+
+    <div class="row">
+      <div>
+        <label for="expiry">Link expires</label>
+        <select id="expiry">
+          <option value="">Never</option>
+          <option value="1">After 1 hour</option>
+          <option value="24">After 1 day</option>
+          <option value="168">After 7 days</option>
+          <option value="720">After 30 days</option>
+        </select>
+      </div>
+      <div>
+        <label for="key">Admin key</label>
+        <input id="key" type="password" placeholder="Only if you set ADMIN_KEY" autocomplete="off">
+      </div>
+    </div>
+
+    <label for="mode">What visitors see</label>
+    <select id="mode">
+      <option value="proxy">Hide the original URL (recommended)</option>
+      <option value="redirect">Redirect (original URL appears in the address bar)</option>
+    </select>
+
+    <label class="check"><input id="oneTime" type="checkbox"> Stop working after the first visit</label>
+
+    <button class="primary" id="create">Create masked link</button>
+    <div class="error" id="error" role="alert"></div>
+
+    <div class="result" id="result">
+      <label for="out">Your shareable link</label>
+      <div class="link">
+        <input id="out" type="text" readonly>
+        <button id="copy">Copy link</button>
+      </div>
+    </div>
+  </div>
+
+  <h2>Your links</h2>
+  <div class="panel" id="list"><span class="empty">No links yet.</span></div>
+
+  <details>
+    <summary>How does hiding work?</summary>
+    <p>In hide mode, your server fetches the page or file and passes it to the visitor, so the address bar keeps showing your link. Clicking links inside a proxied web page may still go to the real site. Hide mode works best for files, PDFs, images, and videos. Redirect mode is faster and works with every site.</p>
+  </details>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const keyInput = $("key");
+keyInput.value = localStorage.getItem("adminKey") || "";
+
+const headers = () => ({ "Content-Type": "application/json", "x-admin-key": keyInput.value });
+const fmtDate = (t) => new Date(t).toLocaleString();
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, { ...opts, headers: headers() });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || "Something went wrong");
+  return data;
+}
+
+async function refresh() {
+  try {
+    const items = await api("/api/links");
+    if (!items.length) { $("list").innerHTML = '<span class="empty">No links yet.</span>'; return; }
+    $("list").innerHTML = "";
+    for (const it of items) {
+      const el = document.createElement("div");
+      el.className = "item";
+      const expired = it.expiresAt && Date.now() > it.expiresAt;
+      el.innerHTML = `
+        <div class="info">
+          <div class="short"></div>
+          <div class="target"></div>
+          <div class="meta">${it.clicks} visit${it.clicks === 1 ? "" : "s"} · created ${fmtDate(it.createdAt)}${
+            it.expiresAt ? ` · ${expired ? "expired" : "expires " + fmtDate(it.expiresAt)}` : ""}${it.oneTime ? " · one-time" : ""}${it.mode === "proxy" ? " · hidden" : " · redirect"}</div>
+        </div>
+        <button class="small" data-copy>Copy</button>
+        <button class="small danger" data-del>Delete</button>`;
+      el.querySelector(".short").textContent = it.link;
+      el.querySelector(".target").textContent = it.target;
+      el.querySelector("[data-copy]").onclick = (e) => copyText(it.link, e.target);
+      el.querySelector("[data-del]").onclick = async () => {
+        await api("/api/links/" + it.id, { method: "DELETE" });
+        refresh();
+      };
+      $("list").appendChild(el);
+    }
+  } catch (e) {
+    $("list").innerHTML = `<span class="empty">${e.message}</span>`;
+  }
+}
+
+async function copyText(text, btn) {
+  try { await navigator.clipboard.writeText(text); }
+  catch { $("out").select(); document.execCommand("copy"); }
+  const old = btn.textContent; btn.textContent = "Copied";
+  setTimeout(() => (btn.textContent = old), 1500);
+}
+
+$("create").onclick = async () => {
+  $("error").textContent = "";
+  localStorage.setItem("adminKey", keyInput.value);
+  try {
+    const data = await api("/api/links", {
+      method: "POST",
+      body: JSON.stringify({
+        url: $("url").value.trim(),
+        expiresInHours: $("expiry").value || null,
+        oneTime: $("oneTime").checked,
+        mode: $("mode").value,
+      }),
+    });
+    $("out").value = data.link;
+    $("result").classList.add("show");
+    $("url").value = "";
+    refresh();
+  } catch (e) {
+    $("error").textContent = e.message;
+  }
+};
+$("url").addEventListener("keydown", (e) => { if (e.key === "Enter") $("create").click(); });
+$("copy").onclick = (e) => copyText($("out").value, e.target);
+keyInput.addEventListener("change", refresh);
+refresh();
+</script>
+</body>
+</html>

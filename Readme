@@ -1,0 +1,18 @@
+# Link Masker
+
+Create random share links that redirect to your real URLs.
+
+## Run it
+```bash
+npm install
+ADMIN_KEY=choose-a-secret npm start      # Windows PowerShell: $env:ADMIN_KEY="choose-a-secret"; npm start
+```
+Open http://localhost:3000, paste a URL, click **Create masked link**, copy and share.
+
+## Settings (environment variables)
+- `ADMIN_KEY`: only people with this key can create/list/delete links (visitors don't need it)
+- `BASE_URL`: your public address, e.g. `https://links.yourdomain.com`, so copied links use it instead of localhost
+- `PORT`: default 3000
+
+## Deploy
+Any Node host works (Render, Railway, Fly.io, a VPS). Note: links are saved in `links.json`, so use a host with a persistent disk, or swap in a database.

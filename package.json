@@ -1,0 +1,9 @@
+{
+  "name": "link-masker",
+  "version": "1.0.0",
+  "description": "Create random share links that redirect to your real URLs",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "dependencies": { "express": "^4.19.2" },
+  "engines": { "node": ">=20" }
+}
